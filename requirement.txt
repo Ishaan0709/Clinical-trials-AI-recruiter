@@ -1,7 +1,9 @@
 streamlit
-langchain
-openai
-faiss-cpu
+requests
 pandas
 python-dotenv
-pymupdf
+langchain
+langchain-community
+langchain-openai
+faiss-cpu
+PyMuPDF

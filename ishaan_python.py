@@ -29,7 +29,6 @@ with tab1:
     st.header("TechVitals Admin Panel")
     st.write("Upload volunteer data or explore the existing dataset. Filter volunteers and ask questions using natural language.")
     
-    # File uploader with better spacing
     with st.container(border=True):
         file_csv = st.file_uploader("Upload Volunteer CSV", type=['csv'], key="csv_uploader")
         if file_csv is not None:
@@ -39,7 +38,6 @@ with tab1:
     if df_vol.empty:
         st.info("No volunteer data available.")
     else:
-        # Enhanced filter controls using columns
         col1, col2, col3 = st.columns(3)
         with col1:
             min_age_val = int(df_vol['Age'].min()) if not df_vol.empty else 0
@@ -53,7 +51,6 @@ with tab1:
             regions = ["All"] + sorted(df_vol['Region'].dropna().unique().tolist())
             region_choice = st.selectbox("Region", options=regions, index=0, key="admin_region")
         
-        # Apply filters
         filtered_df = df_vol.copy()
         filtered_df = filtered_df[(filtered_df['Age'] >= age_range[0]) & (filtered_df['Age'] <= age_range[1])]
         if gender_choice != "All":
@@ -61,11 +58,9 @@ with tab1:
         if region_choice != "All":
             filtered_df = filtered_df[filtered_df['Region'] == region_choice]
         
-        # Data display
         with st.expander("📋 Volunteer List", expanded=True):
             st.dataframe(filtered_df.reset_index(drop=True), use_container_width=True)
         
-        # Enhanced Q&A Section
         with st.container(border=True):
             st.subheader("💬 Dataset Q&A")
             with st.form(key="dataset_qa_form"):
@@ -89,7 +84,6 @@ with tab2:
     st.header("Medical Company Portal")
     st.write("Upload trial criteria or manually enter parameters to find eligible volunteers.")
     
-    # Mode selection with better visual hierarchy
     with st.container(border=True):
         mode = st.radio("Input Method:", ["Upload PDF", "Fill Form"], index=0, 
                         horizontal=True, key="mode_selector")
@@ -137,10 +131,14 @@ with tab2:
                         'gender': gender_allowed, 
                         'exclude_diabetes': exclude_diab, 'exclude_pregnant': exclude_preg
                     }
-                    # [Rest of form processing unchanged]
+                    criteria['conditions'] = [c.strip() for c in criteria['conditions'] if c.strip()]
+                    criteria['stages'] = [s.strip().upper() for s in criteria['stages']]
+                    st.session_state.inclusion_points = []
+                    st.session_state.exclusion_points = []
+                    st.session_state.matched_df = filter_volunteers(st.session_state.volunteers_df, criteria)
+                    st.session_state.active_criteria = True
 
     if st.session_state.active_criteria:
-        # Enhanced criteria display
         with st.expander("🔍 Trial Criteria Summary", expanded=True):
             if mode == "Upload PDF" and st.session_state.inclusion_points:
                 st.subheader("Inclusion Criteria")
@@ -151,9 +149,40 @@ with tab2:
                 for pt in st.session_state.exclusion_points:
                     st.markdown(f"❌ {pt}")
             else:
-                # [Keep existing manual criteria display]
+                inc_list = []
+                exc_list = []
+                if criteria.get('min_age') is not None or criteria.get('max_age') is not None:
+                    age_min_val = criteria.get('min_age', 0)
+                    age_max_val = criteria.get('max_age', 120)
+                    inc_list.append(f"Age between {age_min_val} and {age_max_val} years")
+                if criteria.get('conditions'):
+                    inc_list.append("Condition: " + ", ".join(criteria['conditions']))
+                if criteria.get('biomarker'):
+                    inc_list.append(f"Biomarker required: {criteria['biomarker']}")
+                if criteria.get('stages'):
+                    stages_str = ", ".join(criteria['stages'])
+                    inc_list.append(f"Allowed Stages: {stages_str}")
+                else:
+                    inc_list.append("Allowed Stages: Any")
+                if criteria.get('gender') and criteria['gender'] != "Any":
+                    inc_list.append(f"Gender: {criteria['gender']} only")
+                else:
+                    inc_list.append("Gender: Any")
+                if criteria.get('exclude_diabetes'):
+                    exc_list.append("Excluding volunteers with diabetes")
+                if criteria.get('exclude_pregnant'):
+                    exc_list.append("Excluding pregnant volunteers")
+                
+                if inc_list:
+                    st.markdown("**Inclusion Criteria:**")
+                    for item in inc_list:
+                        st.markdown(f"- {item}")
+                if exc_list:
+                    st.markdown("**Exclusion Criteria:**")
+                    for item in exc_list:
+                        st.markdown(f"- {item}")
 
-        # Eligible volunteers section
+        # Corrected eligible_df line
         eligible_df = st.session_state.matched_df.copy().reset_index(drop=True) if st.session_state.matched_df is not None else pd.DataFrame()
         
         with st.container(border=True):
@@ -161,7 +190,6 @@ with tab2:
             if eligible_df.empty:
                 st.info("No matching volunteers found")
             else:
-                # Enhanced filters using columns
                 col1, col2, col3, col4 = st.columns([2,1.5,1.5,1.5])
                 with col1:
                     min_age2 = int(eligible_df['Age'].min())
@@ -177,7 +205,6 @@ with tab2:
                     stage2 = ["All"] + sorted(eligible_df['DiseaseStage'].dropna().unique().tolist())
                     stage_choice2 = st.selectbox("Filter Stage", stage2, key="matched_stage")
                 
-                # Apply filters
                 filtered_matched = eligible_df.copy()
                 filtered_matched = filtered_matched[(filtered_matched['Age'] >= age_range2[0]) & (filtered_matched['Age'] <= age_range2[1])]
                 if gender_choice2 != "All":
@@ -187,11 +214,9 @@ with tab2:
                 if stage_choice2 != "All":
                     filtered_matched = filtered_matched[filtered_matched['DiseaseStage'] == stage_choice2]
                 
-                # Data display and export
                 st.write(f"🔢 Matching Volunteers: {len(filtered_matched)}")
                 st.dataframe(filtered_matched, use_container_width=True)
                 
-                # Export buttons in columns
                 col_exp1, col_exp2 = st.columns(2)
                 with col_exp1:
                     csv_data = filtered_matched.to_csv(index=False)
@@ -203,7 +228,6 @@ with tab2:
                                          file_name="Trial_Criteria.pdf", mime="application/pdf",
                                          use_container_width=True)
 
-        # Enhanced Q&A Section
         with st.container(border=True):
             st.subheader("💬 Matched Volunteers Q&A")
             with st.form(key="matched_qa_form"):

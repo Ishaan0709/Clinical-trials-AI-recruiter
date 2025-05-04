@@ -3,6 +3,7 @@ import pandas as pd
 import fitz
 import re
 import os
+import tempfile
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
@@ -14,11 +15,11 @@ from langchain_openai import ChatOpenAI
 st.set_page_config(page_title="AI Clinical Trial System", layout="wide", page_icon="⚕️")
 
 # Load environment variables
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")  # Set in your system environment
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # ---------------------- Core AI Components ----------------------
-embeddings = OpenAIEmbeddings()
-llm = ChatOpenAI(temperature=0, model_name="gpt-4")
+embeddings = OpenAIEmbeddings(openai_api_key=OPENAI_API_KEY)
+llm = ChatOpenAI(temperature=0, model_name="gpt-3.5-turbo", openai_api_key=OPENAI_API_KEY)
 
 # ---------------------- Session State Initialization ----------------------
 if 'volunteers' not in st.session_state:
@@ -26,72 +27,109 @@ if 'volunteers' not in st.session_state:
         'volunteers': pd.DataFrame(),
         'vector_store': None,
         'qa_chain': None,
-        'criteria_text': "",
         'dataset_qa': [],
         'trial_qa': [],
-        'matched_df': None
+        'matched_df': None,
+        'criteria': {}
     })
 
-# ---------------------- AI Processing Functions ----------------------
+# ---------------------- Fixed Processing Functions ----------------------
+def extract_criteria(text):
+    """Extract inclusion/exclusion criteria from text"""
+    criteria = {
+        'min_age': 18,
+        'max_age': 75,
+        'biomarker': None,
+        'stages': [],
+        'exclude_diabetes': False,
+        'exclude_pregnant': False
+    }
+    
+    # Age extraction
+    age_match = re.search(r'age\s*between\s*(\d+)\s*to\s*(\d+)', text, re.I)
+    if age_match:
+        criteria['min_age'] = int(age_match.group(1))
+        criteria['max_age'] = int(age_match.group(2))
+    
+    # Biomarker extraction
+    biomarker_match = re.search(r'biomarker\s*status:\s*(\w+\+?)', text, re.I)
+    if biomarker_match:
+        criteria['biomarker'] = biomarker_match.group(1).upper()
+    
+    # Stage extraction
+    criteria['stages'] = re.findall(r'stage\s*(III?I?V?)', text, re.I)
+    
+    # Other criteria
+    criteria['exclude_diabetes'] = bool(re.search(r'exclude\s*diabetes', text, re.I))
+    criteria['exclude_pregnant'] = bool(re.search(r'exclude\s*pregnant', text, re.I))
+    
+    return criteria
+
 def process_pdf(pdf_bytes):
-    """Process PDF using LangChain pipeline"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_bytes)
-        loader = PyMuPDFLoader(tmp.name)
-    
-    documents = loader.load()
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=1000,
-        chunk_overlap=200
-    )
-    chunks = text_splitter.split_documents(documents)
-    
-    st.session_state.vector_store = FAISS.from_documents(chunks, embeddings)
-    st.session_state.qa_chain = RetrievalQA.from_chain_type(
-        llm=llm,
-        chain_type="stuff",
-        retriever=st.session_state.vector_store.as_retriever()
-    )
-    os.unlink(tmp.name)
+    """Process PDF using LangChain pipeline with error handling"""
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
+            tmp.write(pdf_bytes)
+            tmp_path = tmp.name
+        
+        loader = PyMuPDFLoader(tmp_path)
+        documents = loader.load()
+        
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200
+        )
+        chunks = text_splitter.split_documents(documents)
+        
+        st.session_state.vector_store = FAISS.from_documents(chunks, embeddings)
+        st.session_state.qa_chain = RetrievalQA.from_chain_type(
+            llm=llm,
+            chain_type="stuff",
+            retriever=st.session_state.vector_store.as_retriever()
+        )
+        
+        # Extract criteria from text
+        full_text = "\n".join([doc.page_content for doc in documents])
+        st.session_state.criteria = extract_criteria(full_text)
+        
+    except Exception as e:
+        st.error(f"PDF Processing Error: {str(e)}")
+    finally:
+        if os.path.exists(tmp_path):
+            os.remove(tmp_path)
 
-def ai_answer(question, context_df=None):
-    """Hybrid AI + Rules Answering System"""
-    # First check rule-based answers
-    rule_based_answer = answer_question_about_df(question, context_df or st.session_state.volunteers)
-    if "I'm sorry" not in rule_based_answer:
-        return rule_based_answer
+# ---------------------- Core Application Logic ----------------------
+def filter_volunteers(df):
+    """Filter volunteers using AI-enhanced criteria"""
+    try:
+        filtered = df.copy()
+        criteria = st.session_state.criteria
+        
+        # Basic filters
+        filtered = filtered[
+            (filtered['Age'] >= criteria['min_age']) &
+            (filtered['Age'] <= criteria['max_age'])
+        ]
+        
+        # Biomarker filter
+        if criteria['biomarker']:
+            filtered = filtered[filtered['BiomarkerStatus'] == criteria['biomarker']]
+        
+        # Stage filter
+        if criteria['stages']:
+            filtered = filtered[filtered['DiseaseStage'].isin(criteria['stages'])]
+        
+        # Medical exclusions
+        if criteria['exclude_diabetes']:
+            filtered = filtered[filtered['Diabetes'] == 'No']
+        if criteria['exclude_pregnant']:
+            filtered = filtered[filtered['Pregnant'] == 'No']
+            
+        return filtered
     
-    # Fallback to AI if rules fail
-    if st.session_state.qa_chain:
-        result = st.session_state.qa_chain({"query": question})
-        return result["result"]
-    return "Unable to answer with current data"
-
-# ---------------------- Original Core Functions (Enhanced) ----------------------
-def parse_trial_pdf(pdf_bytes):
-    """Integrated PDF Processing"""
-    process_pdf(pdf_bytes)  # Using LangChain now
-    doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-    text = "\n".join([page.get_text() for page in doc])
-    doc.close()
-    return extract_criteria(text), [], []
-
-def filter_volunteers(df, criteria):
-    """Hybrid Filtering System"""
-    # Original rule-based filtering
-    filtered = df.copy()
-    if criteria.get('min_age'):
-        filtered = filtered[filtered['Age'] >= criteria['min_age']]
-    if criteria.get('max_age'):
-        filtered = filtered[filtered['Age'] <= criteria['max_age']]
-    
-    # AI-enhanced filtering
-    if st.session_state.vector_store:
-        docs = st.session_state.vector_store.similarity_search(criteria.get('biomarker', ""), k=3)
-        biomarkers = [d.page_content for d in docs]
-        filtered = filtered[filtered['BiomarkerStatus'].isin(biomarkers)]
-    
-    return filtered
+    except Exception as e:
+        st.error(f"Filtering Error: {str(e)}")
+        return pd.DataFrame()
 
 # ---------------------- UI Components ----------------------
 def main():
@@ -102,8 +140,11 @@ def main():
         if os.path.exists("Realistic_Indian_Volunteers.csv"):
             try:
                 st.session_state.volunteers = pd.read_csv("Realistic_Indian_Volunteers.csv")
+                st.success("Loaded default volunteer data!")
             except Exception as e:
-                st.error(f"Error loading CSV: {str(e)}")
+                st.error(f"CSV Load Error: {str(e)}")
+        else:
+            st.warning("Default dataset not found!")
 
     # Tab System
     tab_admin, tab_trial = st.tabs(["Admin Portal", "Trial Management"])
@@ -111,73 +152,47 @@ def main():
     with tab_admin:
         st.header("Volunteer Database Management")
         
-        # File Upload
+        # CSV Upload
         csv_file = st.file_uploader("Upload Volunteer CSV", type=['csv'])
         if csv_file:
-            st.session_state.volunteers = pd.read_csv(csv_file)
+            try:
+                st.session_state.volunteers = pd.read_csv(csv_file)
+                st.success("Volunteer data updated!")
+            except Exception as e:
+                st.error(f"CSV Upload Error: {str(e)}")
         
-        # Filters and Table
+        # Display Data
         if not st.session_state.volunteers.empty:
-            col1, col2 = st.columns(2)
-            with col1:
-                age_range = st.slider("Age Filter", 
-                                    st.session_state.volunteers['Age'].min(),
-                                    st.session_state.volunteers['Age'].max(),
-                                    (25, 75))
-            with col2:
-                region_filter = st.selectbox("Region Filter", 
-                                           ["All"] + list(st.session_state.volunteers['Region'].unique()))
-            
-            filtered_df = st.session_state.volunteers.query(f"Age >= {age_range[0]} & Age <= {age_range[1]}")
-            if region_filter != "All":
-                filtered_df = filtered_df[filtered_df['Region'] == region_filter]
-            
-            st.dataframe(filtered_df, height=400)
-            
-            # Q&A System
-            with st.form("dataset_qa"):
-                question = st.text_input("Ask about volunteers:")
-                if st.form_submit_button("Get AI Analysis"):
-                    answer = ai_answer(question, filtered_df)
-                    st.session_state.dataset_qa.append((question, answer))
+            st.dataframe(st.session_state.volunteers, height=400)
 
     with tab_trial:
-        st.header("AI Trial Configuration")
+        st.header("Trial Configuration")
         
-        # PDF Processing
+        # PDF Upload
         pdf_file = st.file_uploader("Upload Trial PDF", type=['pdf'])
         if pdf_file:
-            process_pdf(pdf_file.read())
-            st.success("AI Processed Trial Document!")
+            try:
+                process_pdf(pdf_file.read())
+                st.success("AI Processed Trial Document!")
+                
+                # Show extracted criteria
+                with st.expander("Extracted Trial Criteria"):
+                    st.json(st.session_state.criteria)
+                
+            except Exception as e:
+                st.error(f"PDF Upload Error: {str(e)}")
         
-        # Matching System
-        if st.session_state.vector_store:
-            question = st.text_input("Ask about trial criteria:")
-            if question:
-                answer = ai_answer(question)
-                st.session_state.trial_qa.append((question, answer))
-            
-            if st.button("Find Eligible Volunteers"):
-                docs = st.session_state.vector_store.similarity_search("eligibility criteria", k=5)
-                criteria = "\n".join([d.page_content for d in docs])
-                st.session_state.matched_df = filter_volunteers(st.session_state.volunteers, {
-                    'min_age': 40,  # Example, extract from criteria
-                    'max_age': 70,
-                    'biomarker': criteria
-                })
-        
-        if st.session_state.matched_df is not None:
-            st.dataframe(st.session_state.matched_df)
-
-    # History Section
-    with st.expander("Conversation History"):
-        st.subheader("Dataset Q&A")
-        for q, a in st.session_state.dataset_qa[-5:]:
-            st.markdown(f"**Q:** {q}  \n**A:** {a}")
-        
-        st.subheader("Trial Q&A")
-        for q, a in st.session_state.trial_qa[-5:]:
-            st.markdown(f"**Q:** {q}  \n**A:** {a}")
+        # Volunteer Matching
+        if st.button("Find Eligible Volunteers"):
+            if not st.session_state.volunteers.empty:
+                st.session_state.matched_df = filter_volunteers(st.session_state.volunteers)
+                if not st.session_state.matched_df.empty:
+                    st.success(f"Found {len(st.session_state.matched_df)} eligible volunteers")
+                    st.dataframe(st.session_state.matched_df)
+                else:
+                    st.warning("No eligible volunteers found")
+            else:
+                st.error("No volunteer data loaded!")
 
 if __name__ == "__main__":
     main()

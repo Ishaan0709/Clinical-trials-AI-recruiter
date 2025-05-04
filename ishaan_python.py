@@ -1,6 +1,8 @@
 import streamlit as st
 import pandas as pd
+import os
 import fitz
+import tempfile
 import re
 from langchain_community.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -11,10 +13,10 @@ st.set_page_config(page_title="AI Clinical Trial Management System", layout="wid
 st.title("AI Clinical Trial Management System")
 
 # -------------------------- SESSION STATE INIT --------------------------
-if 'volunteers_df' not in st.session_state:
-    try:
+if "volunteers_df" not in st.session_state:
+    if "Realistic_Indian_Volunteers.csv" in os.listdir():
         st.session_state.volunteers_df = pd.read_csv("Realistic_Indian_Volunteers.csv")
-    except:
+    else:
         st.session_state.volunteers_df = pd.DataFrame()
     st.session_state.history_admin = []
     st.session_state.history_medical = []
@@ -23,7 +25,11 @@ if 'volunteers_df' not in st.session_state:
 
 # -------------------------- PDF PARSER FUNCTION --------------------------
 def parse_pdf(pdf_file):
-    loader = PyMuPDFLoader(pdf_file)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_file:
+        tmp_file.write(pdf_file.read())
+        tmp_path = tmp_file.name
+
+    loader = PyMuPDFLoader(tmp_path)
     docs = loader.load()
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
     chunks = splitter.split_documents(docs)
@@ -49,15 +55,15 @@ def parse_pdf(pdf_file):
     if age_match:
         criteria["min_age"], criteria["max_age"] = map(int, age_match[0])
 
-    if re.search("Non-Small Cell Lung Cancer|NSCLC", text):
+    if re.search("Non-Small Cell Lung Cancer|NSCLC", text, re.IGNORECASE):
         criteria["condition"] = "Non-Small Cell Lung Cancer (NSCLC)"
 
     if "EGFR+" in text:
         criteria["biomarker"] = "EGFR+"
 
-    stage_match = re.findall(r'\b(I{1,3}|IV)\b', text)
+    stage_match = re.findall(r'\b(Stage\s*)?(I{1,3}|IV)\b', text)
     if stage_match:
-        criteria["stages"] = list(set(stage_match))
+        criteria["stages"] = list(set([s[1].upper() for s in stage_match]))
 
     if "pregnant" in text.lower():
         criteria["exclude_pregnant"] = "Yes"
@@ -66,6 +72,9 @@ def parse_pdf(pdf_file):
 
 # -------------------------- FILTER FUNCTION --------------------------
 def filter_volunteers(df, criteria):
+    if df.empty:
+        return pd.DataFrame()
+
     result = df.copy()
     result = result[(result['Age'] >= criteria["min_age"]) & (result['Age'] <= criteria["max_age"])]
     if criteria["condition"]:
@@ -73,7 +82,8 @@ def filter_volunteers(df, criteria):
     if criteria["biomarker"]:
         result = result[result["BiomarkerStatus"].str.upper() == criteria["biomarker"].upper()]
     if criteria["stages"]:
-        result = result[result["DiseaseStage"].isin(criteria["stages"])]
+        stage_clean = [s.replace("Stage", "").strip().upper() for s in criteria["stages"]]
+        result = result[result["DiseaseStage"].str.upper().isin(stage_clean)]
     if criteria["gender"] != "Any":
         result = result[result["Gender"].str.lower() == criteria["gender"].lower()]
     if criteria["exclude_diabetes"] == "Yes":
@@ -83,113 +93,72 @@ def filter_volunteers(df, criteria):
     return result
 
 # -------------------------- QA FUNCTION --------------------------
-def answer_question(q, df, full_df):
+def answer_question(q, df):
+    if df.empty:
+        return "No eligible volunteers."
     q_lower = q.lower()
-
-    # Count based questions
     if "how many" in q_lower:
-        if "male" in q_lower:
-            count = len(df[df["Gender"].str.lower() == "male"])
-            return f"There are {count} eligible male volunteers."
-        elif "female" in q_lower:
-            count = len(df[df["Gender"].str.lower() == "female"])
-            return f"There are {count} eligible female volunteers."
-        elif "egfr+" in q_lower:
-            count = len(df[df["BiomarkerStatus"].str.upper() == "EGFR+"])
-            return f"There are {count} EGFR+ eligible volunteers."
-        elif "stage iii" in q_lower:
-            count = len(df[df["DiseaseStage"] == "III"])
-            return f"There are {count} volunteers in Stage III."
-        elif "stage iv" in q_lower:
-            count = len(df[df["DiseaseStage"] == "IV"])
-            return f"There are {count} volunteers in Stage IV."
-        else:
-            return f"There are {len(df)} eligible volunteers."
-
-    # List based questions
+        return f"There are {len(df)} eligible volunteers."
     elif "list" in q_lower:
-        if "male" in q_lower:
-            ids = df[df["Gender"].str.lower() == "male"]["VolunteerID"].tolist()
-        elif "female" in q_lower:
-            ids = df[df["Gender"].str.lower() == "female"]["VolunteerID"].tolist()
-        elif "egfr+" in q_lower:
-            ids = df[df["BiomarkerStatus"].str.upper() == "EGFR+"]["VolunteerID"].tolist()
-        elif "stage iii" in q_lower:
-            ids = df[df["DiseaseStage"] == "III"]["VolunteerID"].tolist()
-        elif "stage iv" in q_lower:
-            ids = df[df["DiseaseStage"] == "IV"]["VolunteerID"].tolist()
-        else:
-            ids = df["VolunteerID"].tolist()
-
-        return "Eligible volunteers: " + ", ".join(ids) if ids else "No eligible volunteers."
-
-    # Why not eligible
-    elif "why" in q_lower and "v00" in q_lower:
-        v_id = re.findall(r'(v\d+)', q_lower)
-        if v_id:
-            v_id = v_id[0].upper()
-            if v_id not in df["VolunteerID"].values:
-                if v_id in full_df["VolunteerID"].values:
-                    return f"{v_id} is not eligible based on the applied criteria."
-                else:
-                    return f"{v_id} does not exist in the dataset."
-            else:
-                return f"{v_id} is eligible."
+        return ", ".join(df["VolunteerID"]) if not df.empty else "No eligible volunteers."
     else:
         return "This question type is not supported."
 
 # -------------------------- UI --------------------------
-
 tab1, tab2 = st.tabs(["TechVitals Admin", "Medical Company"])
 
 # -------------------------- TECHVITALS ADMIN --------------------------
 with tab1:
     st.header("TechVitals Admin Portal")
 
-    uploaded_csv = st.file_uploader("Upload Volunteers CSV", type="csv")
+    uploaded_csv = st.file_uploader("Upload Volunteers CSV", type="csv", key="admin_csv_upload")
     if uploaded_csv:
         st.session_state.volunteers_df = pd.read_csv(uploaded_csv)
 
     df = st.session_state.volunteers_df
 
-    # Filters
-    st.subheader("Filter Volunteers")
-    min_age, max_age = st.slider("Age Range", 0, 100, (30, 75), key="admin_age")
-    gender = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()), key="admin_gender")
-    region = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()), key="admin_region")
+    if not df.empty:
+        st.subheader("Filter Volunteers")
+        min_age, max_age = st.slider("Age Range", 0, 100, (30, 75), key="admin_age_slider")
+        gender = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()), key="admin_gender")
+        region = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()), key="admin_region")
 
-    filtered = df[(df["Age"] >= min_age) & (df["Age"] <= max_age)]
-    if gender != "All":
-        filtered = filtered[filtered["Gender"] == gender]
-    if region != "All":
-        filtered = filtered[filtered["Region"] == region]
+        filtered = df[(df["Age"] >= min_age) & (df["Age"] <= max_age)]
+        if gender != "All":
+            filtered = filtered[filtered["Gender"] == gender]
+        if region != "All":
+            filtered = filtered[filtered["Region"] == region]
 
-    st.subheader("Volunteer List")
-    st.dataframe(filtered)
+        st.subheader("Volunteer List")
+        st.dataframe(filtered)
 
-    # Q&A
-    st.subheader("Ask a Question (AI Powered)")
-    q = st.text_input("Ask about volunteers:", key="admin_q")
-    if st.button("Ask", key="admin_ask"):
-        ans = answer_question(q, filtered, df)
-        st.session_state.history_admin.append((q, ans))
-        st.success(ans)
+        st.subheader("Ask a Question (AI Powered)")
+        q = st.text_input("Ask about volunteers:", key="admin_q")
+        if st.button("Ask", key="admin_ask"):
+            ans = answer_question(q, filtered)
+            st.session_state.history_admin.append((q, ans))
+            st.success(ans)
 
-    if st.session_state.history_admin:
-        with st.expander("Conversation History"):
-            for ques, ans in st.session_state.history_admin:
-                st.markdown(f"**Q:** {ques}\n\n**A:** {ans}")
+        if st.session_state.history_admin:
+            with st.expander("Conversation History"):
+                for ques, ans in st.session_state.history_admin:
+                    st.markdown(f"**Q:** {ques}\n\n**A:** {ans}")
+    else:
+        st.warning("Please upload a valid CSV file to proceed.")
 
 # -------------------------- MEDICAL COMPANY --------------------------
 with tab2:
     st.header("Medical Company Portal")
 
-    pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"])
+    pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"], key="med_pdf")
     if pdf_file:
         with st.spinner("Processing PDF..."):
-            criteria, vectorstore = parse_pdf(pdf_file)
-            st.session_state.criteria = criteria
-            st.session_state.vectorstore = vectorstore
+            try:
+                criteria, vectorstore = parse_pdf(pdf_file)
+                st.session_state.criteria = criteria
+                st.session_state.vectorstore = vectorstore
+            except Exception as e:
+                st.error(f"PDF processing failed: {e}")
 
     if st.session_state.criteria:
         st.subheader("Extracted Criteria:")
@@ -197,13 +166,12 @@ with tab2:
 
         eligible = filter_volunteers(st.session_state.volunteers_df, st.session_state.criteria)
 
-        # Filters
         st.subheader("Filter Eligible Volunteers")
         min_age2, max_age2 = st.slider("Age Range", 0, 100,
                                        (st.session_state.criteria["min_age"], st.session_state.criteria["max_age"]),
-                                       key="medical_age")
-        gender2 = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()), key="medical_gender")
-        region2 = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()), key="medical_region")
+                                       key="med_age_slider")
+        gender2 = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()), key="med_gender")
+        region2 = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()), key="med_region")
 
         filtered_eligible = eligible[(eligible["Age"] >= min_age2) & (eligible["Age"] <= max_age2)]
         if gender2 != "All":
@@ -217,11 +185,10 @@ with tab2:
         else:
             st.dataframe(filtered_eligible[["VolunteerID", "Email", "DiseaseStage", "BiomarkerStatus", "Gender"]])
 
-        # Q&A
         st.subheader("Ask a Question (AI Powered)")
         q2 = st.text_input("Ask about eligible volunteers:", key="medical_q")
         if st.button("Ask", key="medical_ask"):
-            ans2 = answer_question(q2, filtered_eligible, df)
+            ans2 = answer_question(q2, filtered_eligible)
             st.session_state.history_medical.append((q2, ans2))
             st.success(ans2)
 
@@ -229,4 +196,5 @@ with tab2:
             with st.expander("Conversation History"):
                 for ques2, ans2 in st.session_state.history_medical:
                     st.markdown(f"**Q:** {ques2}\n\n**A:** {ans2}")
-
+    else:
+        st.info("Upload a Trial Criteria PDF to view eligible volunteers.")

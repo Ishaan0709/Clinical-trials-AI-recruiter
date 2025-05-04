@@ -1,109 +1,165 @@
 import streamlit as st
 import pandas as pd
-import fitz  # PyMuPDF
 import os
-import tempfile
-import shutil
+import json
+import re
+from dotenv import load_dotenv
 from langchain.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings.openai import OpenAIEmbeddings
+from langchain.embeddings import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
-from dotenv import load_dotenv
+from langchain.chat_models import ChatOpenAI
 
-# Load environment variables
 load_dotenv()
-openai_api_key = os.getenv("OPENAI_API_KEY")
+api_key = os.getenv("OPENAI_API_KEY")
 
-# Enhanced PDF validation
-def is_valid_pdf(file_path):
-    try:
-        with fitz.open(file_path) as doc:
-            if doc.is_encrypted:
-                doc.authenticate("")  # Try empty password
-            if doc.page_count == 0:
-                return False
-        return True
-    except:
-        return False
+if not api_key:
+    st.error("OPENAI_API_KEY not found in .env file.")
+    st.stop()
 
-# Robust PDF processing with validation
+st.set_page_config(page_title="AI Clinical Trial Management System", layout="wide")
+
+st.title("AI Clinical Trial Management System")
+tab1, tab2 = st.tabs(["TechVitals Admin", "Medical Company"])
+
+############################
+##### Helper Functions #####
+############################
+
 def process_pdf(pdf_file):
-    try:
-        # Save to temp file
-        temp_dir = tempfile.mkdtemp()
-        temp_path = os.path.join(temp_dir, "uploaded.pdf")
-        
-        with open(temp_path, "wb") as f:
-            f.write(pdf_file.read())
-        
-        # Validate PDF
-        if not is_valid_pdf(temp_path):
-            raise ValueError("Invalid or corrupted PDF file")
-        
-        # Process with PyMuPDF
-        loader = PyMuPDFLoader(temp_path)
-        documents = loader.load()
-        
-        # Cleanup
-        shutil.rmtree(temp_dir)
-        
-        return FAISS.from_documents(
-            RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100).split_documents(documents),
-            OpenAIEmbeddings(openai_api_key=openai_api_key)
-        )
-    
-    except Exception as e:
-        if 'temp_dir' in locals():
-            shutil.rmtree(temp_dir, ignore_errors=True)
-        st.error(f"PDF Processing Failed: {str(e)}")
-        return None
+    temp_path = "temp_trial.pdf"
+    with open(temp_path, "wb") as f:
+        f.write(pdf_file.read())
 
-# Streamlit UI
-st.set_page_config(page_title="Secure Clinical Trial System", layout="wide")
+    loader = PyMuPDFLoader(temp_path)
+    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    documents = loader.load_and_split(text_splitter=text_splitter)
+    embeddings = OpenAIEmbeddings(openai_api_key=api_key)
+    vectorstore = FAISS.from_documents(documents, embeddings)
+    return vectorstore
 
-# TechVitals Admin Portal
-with st.expander("TechVitals Admin Portal", expanded=True):
-    uploaded_csv = st.file_uploader("Upload Volunteer CSV", type=["csv"])
-    if uploaded_csv:
+def ask_llm(context, question):
+    llm = ChatOpenAI(temperature=0, openai_api_key=api_key)
+    prompt = f"""
+    You are a clinical trial assistant. Based on the following context and question, provide a clear answer.
+    Context:
+    {context}
+
+    Question: {question}
+
+    Give only the answer, no explanations.
+    """
+    response = llm.predict(prompt)
+    return response.strip()
+
+#########################
+##### TechVitals Admin ##
+#########################
+
+with tab1:
+    st.subheader("TechVitals Admin Portal")
+
+    csv_file = st.file_uploader("Upload Volunteer CSV", type=["csv"], key="admin_csv")
+    if csv_file:
+        df = pd.read_csv(csv_file)
+    else:
+        if os.path.exists("patient_data1.csv"):
+            df = pd.read_csv("patient_data1.csv")
+            st.info("Using default patient_data1.csv")
+        else:
+            st.warning("No CSV uploaded and no default CSV found.")
+            df = pd.DataFrame()
+
+    if not df.empty:
+        age_range = st.slider("Age Range", int(df["Age"].min()), int(df["Age"].max()), (int(df["Age"].min()), int(df["Age"].max())))
+        gender = st.selectbox("Gender", ["All"] + list(df["Gender"].dropna().unique()))
+        region = st.selectbox("Region", ["All"] + list(df["Region"].dropna().unique()))
+
+        filtered = df[(df["Age"] >= age_range[0]) & (df["Age"] <= age_range[1])]
+        if gender != "All":
+            filtered = filtered[filtered["Gender"] == gender]
+        if region != "All":
+            filtered = filtered[filtered["Region"] == region]
+
+        st.markdown("### Volunteer List")
+        st.dataframe(filtered)
+
+        st.markdown("### Ask a Question (AI Powered)")
+        admin_question = st.text_input("Ask about volunteers:", key="admin_q")
+
+        if "admin_history" not in st.session_state:
+            st.session_state["admin_history"] = []
+
+        if st.button("Ask", key="admin_ask"):
+            if admin_question:
+                context = filtered.to_json(orient="records")
+                answer = ask_llm(context, admin_question)
+                st.session_state["admin_history"].append((admin_question, answer))
+                st.success(answer)
+
+        with st.expander("Conversation History"):
+            for q, a in st.session_state["admin_history"]:
+                st.markdown(f"**Q:** {q}")
+                st.markdown(f"**A:** {a}")
+                st.markdown("---")
+
+#########################
+##### Medical Company ###
+#########################
+
+with tab2:
+    st.subheader("Medical Company Portal")
+
+    pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"], key="med_pdf")
+    if pdf_file:
         try:
-            df = pd.read_csv(uploaded_csv)
-            required_cols = {'VolunteerID', 'Age', 'Gender', 'Condition', 'Email'}
-            
-            if required_cols.issubset(df.columns):
-                st.success("Dataset loaded successfully!")
-                st.dataframe(df.head())
-            else:
-                st.error(f"Missing columns: {required_cols - set(df.columns)}")
+            vectorstore = process_pdf(pdf_file)
+            st.success("PDF processed and indexed.")
+            st.session_state["vectorstore"] = vectorstore
         except Exception as e:
-            st.error(f"CSV Error: {str(e)}")
+            st.error(f"Error processing PDF: {e}")
+            st.session_state["vectorstore"] = None
+    else:
+        st.session_state["vectorstore"] = None
 
-# Medical Company Portal
-with st.expander("Medical Trial Portal", expanded=True):
-    uploaded_pdf = st.file_uploader("Upload Trial Criteria PDF", 
-                                  type=["pdf"],
-                                  help="Upload a valid, unencrypted PDF document")
-    
-    if uploaded_pdf:
-        vector_store = process_pdf(uploaded_pdf)
-        
-        if vector_store:
-            st.success("PDF Successfully Analyzed!")
-            
-            # Eligibility Search
-            query = st.text_input("Search for eligible volunteers:")
-            if query:
-                try:
-                    results = vector_store.similarity_search(query, k=5)
-                    st.subheader("Matching Criteria:")
-                    for doc in results:
-                        st.write(doc.page_content)
-                except Exception as e:
-                    st.error(f"Search Error: {str(e)}")
+    if not df.empty:
+        age_range_m = st.slider("Age Range", int(df["Age"].min()), int(df["Age"].max()), (int(df["Age"].min()), int(df["Age"].max())), key="med_age")
+        gender_m = st.selectbox("Gender", ["All"] + list(df["Gender"].dropna().unique()), key="med_gender")
+        region_m = st.selectbox("Region", ["All"] + list(df["Region"].dropna().unique()), key="med_region")
 
-# Common error prevention features
-st.markdown("""
-<style>
-    .stExpander {border: 1px solid #e0e0e0; border-radius: 8px; margin: 1rem 0;}
-    .stFileUploader {margin-bottom: 1rem;}
-</style>
-""", unsafe_allow_html=True)
+        filtered_m = df[(df["Age"] >= age_range_m[0]) & (df["Age"] <= age_range_m[1])]
+        if gender_m != "All":
+            filtered_m = filtered_m[filtered_m["Gender"] == gender_m]
+        if region_m != "All":
+            filtered_m = filtered_m[filtered_m["Region"] == region_m]
+
+        st.markdown("### Eligible Volunteers (Privacy Protected)")
+
+        # Only show ID, Email, Stage, Biomarker, Gender
+        display_cols = ["VolunteerID", "Email", "DiseaseStage", "BiomarkerStatus", "Gender"]
+        st.dataframe(filtered_m[display_cols])
+
+        st.markdown("### Ask a Question (AI Powered)")
+        med_question = st.text_input("Ask about eligible volunteers:", key="med_q")
+
+        if "med_history" not in st.session_state:
+            st.session_state["med_history"] = []
+
+        if st.button("Ask", key="med_ask"):
+            if med_question:
+                if st.session_state.get("vectorstore") is not None:
+                    docs = st.session_state["vectorstore"].similarity_search(med_question, k=3)
+                    context = " ".join([doc.page_content for doc in docs])
+                else:
+                    context = ""
+                data_context = filtered_m[display_cols].to_json(orient="records")
+                full_context = f"PDF context:\n{context}\n\nData:\n{data_context}"
+                answer = ask_llm(full_context, med_question)
+                st.session_state["med_history"].append((med_question, answer))
+                st.success(answer)
+
+        with st.expander("Conversation History"):
+            for q, a in st.session_state["med_history"]:
+                st.markdown(f"**Q:** {q}")
+                st.markdown(f"**A:** {a}")
+                st.markdown("---")

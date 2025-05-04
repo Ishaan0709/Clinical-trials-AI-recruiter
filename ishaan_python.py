@@ -12,7 +12,7 @@ st.title("AI Clinical Trial Management System")
 
 # -------------------------- SESSION STATE INIT --------------------------
 if 'volunteers_df' not in st.session_state:
-    st.session_state.volunteers_df = pd.read_csv("Realistic_Indian_Volunteers.csv")
+    st.session_state.volunteers_df = pd.DataFrame()
     st.session_state.history_admin = []
     st.session_state.history_medical = []
     st.session_state.criteria = None
@@ -26,7 +26,6 @@ def parse_pdf(pdf_file):
     chunks = splitter.split_documents(docs)
     text = " ".join([chunk.page_content for chunk in chunks])
 
-    # Create vectorstore
     embeddings = OpenAIEmbeddings()
     vectorstore = FAISS.from_documents(chunks, embeddings)
 
@@ -63,6 +62,9 @@ def parse_pdf(pdf_file):
 
 # -------------------------- FILTER FUNCTION --------------------------
 def filter_volunteers(df, criteria):
+    if df.empty:
+        return pd.DataFrame()
+
     result = df.copy()
     result = result[(result['Age'] >= criteria["min_age"]) & (result['Age'] <= criteria["max_age"])]
     if criteria["condition"]:
@@ -82,6 +84,8 @@ def filter_volunteers(df, criteria):
 # -------------------------- QA FUNCTION --------------------------
 def answer_question(q, df):
     q_lower = q.lower()
+    if df.empty:
+        return "No eligible volunteers available."
     if "how many" in q_lower:
         return f"There are {len(df)} eligible volunteers."
     elif "list" in q_lower:
@@ -103,33 +107,37 @@ with tab1:
 
     df = st.session_state.volunteers_df
 
-    # Filters
-    st.subheader("Filter Volunteers")
-    min_age, max_age = st.slider("Age Range", 0, 100, (30, 75))
-    gender = st.selectbox("Gender", ["All"] + sorted(df["Gender"].unique()))
-    region = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()))
+    if not df.empty:
+        # Filters
+        st.subheader("Filter Volunteers")
+        min_age, max_age = st.slider("Age Range", 0, 100, (30, 75))
+        gender = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()))
+        region = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()))
 
-    filtered = df[(df["Age"] >= min_age) & (df["Age"] <= max_age)]
-    if gender != "All":
-        filtered = filtered[filtered["Gender"] == gender]
-    if region != "All":
-        filtered = filtered[filtered["Region"] == region]
+        filtered = df[(df["Age"] >= min_age) & (df["Age"] <= max_age)]
+        if gender != "All":
+            filtered = filtered[filtered["Gender"] == gender]
+        if region != "All":
+            filtered = filtered[filtered["Region"] == region]
 
-    st.subheader("Volunteer List")
-    st.dataframe(filtered)
+        st.subheader("Volunteer List")
+        st.dataframe(filtered)
 
-    # Q&A
-    st.subheader("Ask a Question (AI Powered)")
-    q = st.text_input("Ask about volunteers:")
-    if st.button("Ask", key="admin_ask"):
-        ans = answer_question(q, filtered)
-        st.session_state.history_admin.append((q, ans))
-        st.success(ans)
+        # Q&A
+        st.subheader("Ask a Question (AI Powered)")
+        q = st.text_input("Ask about volunteers:")
+        if st.button("Ask", key="admin_ask"):
+            ans = answer_question(q, filtered)
+            st.session_state.history_admin.append((q, ans))
+            st.success(ans)
 
-    if st.session_state.history_admin:
-        with st.expander("Conversation History"):
-            for ques, ans in st.session_state.history_admin:
-                st.markdown(f"**Q:** {ques}\n\n**A:** {ans}")
+        if st.session_state.history_admin:
+            with st.expander("Conversation History"):
+                for ques, ans in st.session_state.history_admin:
+                    st.markdown(f"**Q:** {ques}\n\n**A:** {ans}")
+
+    else:
+        st.info("Please upload a volunteers CSV file to proceed.")
 
 # -------------------------- MEDICAL COMPANY --------------------------
 with tab2:
@@ -142,7 +150,7 @@ with tab2:
             st.session_state.criteria = criteria
             st.session_state.vectorstore = vectorstore
 
-    if st.session_state.criteria:
+    if st.session_state.criteria and not st.session_state.volunteers_df.empty:
         st.subheader("Extracted Criteria:")
         st.json(st.session_state.criteria)
 
@@ -150,8 +158,9 @@ with tab2:
 
         # Filters
         st.subheader("Filter Eligible Volunteers")
-        min_age2, max_age2 = st.slider("Age Range", 0, 100, (st.session_state.criteria["min_age"], st.session_state.criteria["max_age"]))
-        gender2 = st.selectbox("Gender", ["All"] + sorted(df["Gender"].unique()), key="med_gender")
+        min_age2, max_age2 = st.slider("Age Range", 0, 100, 
+                                       (st.session_state.criteria["min_age"], st.session_state.criteria["max_age"]))
+        gender2 = st.selectbox("Gender", ["All"] + sorted(df["Gender"].dropna().unique()), key="med_gender")
         region2 = st.selectbox("Region", ["All"] + sorted(df["Region"].dropna().unique()), key="med_region")
 
         filtered_eligible = eligible[(eligible["Age"] >= min_age2) & (eligible["Age"] <= max_age2)]
@@ -178,3 +187,8 @@ with tab2:
             with st.expander("Conversation History"):
                 for ques2, ans2 in st.session_state.history_medical:
                     st.markdown(f"**Q:** {ques2}\n\n**A:** {ans2}")
+
+    elif not st.session_state.criteria:
+        st.info("Please upload a trial criteria PDF to proceed.")
+    else:
+        st.info("Please upload volunteers CSV in Admin tab first.")

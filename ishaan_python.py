@@ -36,7 +36,7 @@ if 'volunteers' not in st.session_state:
         'current_trial': None
     })
 
-# ---------------------- Enhanced Processing Functions ----------------------
+# ---------------------- Processing Functions ----------------------
 def extract_criteria(text):
     """Enhanced criteria extraction with medicine trial support"""
     criteria = {
@@ -106,7 +106,7 @@ def process_pdf(pdf_bytes):
         if os.path.exists(tmp_path):
             os.remove(tmp_path)
 
-# ---------------------- Enhanced UI Components ----------------------
+# ---------------------- UI Components ----------------------
 def show_qa_panel(context_df, history_key):
     """Universal Q/A Panel Component"""
     with st.expander("Ask Questions", expanded=True):
@@ -123,42 +123,28 @@ def show_qa_panel(context_df, history_key):
                 st.markdown(f"**A:** {a}")
                 st.divider()
 
-def medicine_filters():
-    """Live Medicine Trial Filters"""
-    with st.sidebar.expander("Medicine Trial Parameters"):
-        if st.session_state.current_trial:
-            selected_med = st.selectbox(
-                "Select Medicine",
-                options=st.session_state.current_trial['medicines']
-            )
-            dosage_range = st.slider(
-                "Dosage Range (mg)",
-                0, 1000,
-                value=tuple(map(int, 
-                    st.session_state.criteria['dosage_ranges'][selected_med]
-                        .replace('mg','').split('-')))
-            )
-            st.session_state.current_trial['results'][selected_med] = {
-                'dosage': dosage_range,
-                'participants': []
-            }
-
 def volunteer_filters():
-    """Advanced Volunteer Filtering"""
+    """Fixed Volunteer Filtering Component"""
     with st.expander("Advanced Filters"):
         cols = st.columns(3)
+        
         with cols[0]:
             gender_filter = st.multiselect(
                 "Gender",
                 options=["All"] + list(st.session_state.volunteers['Gender'].unique())
+            )
+        
         with cols[1]:
             stage_filter = st.multiselect(
                 "Disease Stage",
-                options=["All"] + list(st.session_state.volunteers['DiseaseStage'].unique()))
+                options=["All"] + list(st.session_state.volunteers['DiseaseStage'].unique())
+            )
+        
         with cols[2]:
             biomarker_filter = st.multiselect(
                 "Biomarker Status",
-                options=["All"] + list(st.session_state.volunteers['BiomarkerStatus'].unique()))
+                options=["All"] + list(st.session_state.volunteers['BiomarkerStatus'].unique())
+            )
         
         return {
             'gender': gender_filter,
@@ -253,35 +239,6 @@ def main():
         
         # Trial Q/A Panel
         show_qa_panel(st.session_state.matched_df, 'trial_qa')
-
-    with tab_medicine:
-        st.header("Live Medicine Trials")
-        medicine_filters()
-        
-        if st.session_state.current_trial:
-            st.subheader("Active Trial Details")
-            cols = st.columns(3)
-            cols[0].metric("Medicines", len(st.session_state.current_trial['medicines']))
-            cols[1].metric("Participants", len(st.session_state.current_trial['participants']))
-            cols[2].metric("Duration", 
-                f"{(datetime.now() - st.session_state.current_trial['start_date']).days} days")
-            
-            st.subheader("Trial Progress")
-            for med, details in st.session_state.current_trial['results'].items():
-                with st.expander(f"{med} Trial"):
-                    st.write(f"**Dosage Range:** {details['dosage'][0]}mg - {details['dosage'][1]}mg")
-                    st.write(f"**Participants:** {len(details['participants'])}")
-                    
-                    # Progress bar
-                    progress = len(details['participants'])/len(st.session_state.current_trial['participants'])
-                    st.progress(progress)
-                    
-                    # Live updates
-                    if st.button(f"Update {med} Results", key=f"update_{med}"):
-                        # Add actual update logic here
-                        st.session_state.current_trial['results'][med]['participants'].append(
-                            st.session_state.current_trial['participants'].pop()
-                        )
 
 if __name__ == "__main__":
     main()

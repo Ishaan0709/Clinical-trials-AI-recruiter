@@ -1,151 +1,109 @@
 import streamlit as st
 import pandas as pd
+import fitz  # PyMuPDF
 import os
 import tempfile
+import shutil
 from langchain.document_loaders import PyMuPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain.embeddings.openai import OpenAIEmbeddings
 from langchain.vectorstores import FAISS
-from langchain.chat_models import ChatOpenAI
-from langchain.schema import HumanMessage, SystemMessage
-import json
-import re
 from dotenv import load_dotenv
 
-# Configuration
+# Load environment variables
 load_dotenv()
 openai_api_key = os.getenv("OPENAI_API_KEY")
-st.set_page_config(page_title="AI Clinical Trial System", layout="wide")
 
-# Initialize session state
-if 'tech_history' not in st.session_state:
-    st.session_state.tech_history = []
-if 'medical_history' not in st.session_state:
-    st.session_state.medical_history = []
+# Enhanced PDF validation
+def is_valid_pdf(file_path):
+    try:
+        with fitz.open(file_path) as doc:
+            if doc.is_encrypted:
+                doc.authenticate("")  # Try empty password
+            if doc.page_count == 0:
+                return False
+        return True
+    except:
+        return False
 
-# Helper functions
+# Robust PDF processing with validation
 def process_pdf(pdf_file):
-    """Process PDF and return vector store"""
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-        tmp.write(pdf_file.read())
-        loader = PyMuPDFLoader(tmp.name)
+    try:
+        # Save to temp file
+        temp_dir = tempfile.mkdtemp()
+        temp_path = os.path.join(temp_dir, "uploaded.pdf")
+        
+        with open(temp_path, "wb") as f:
+            f.write(pdf_file.read())
+        
+        # Validate PDF
+        if not is_valid_pdf(temp_path):
+            raise ValueError("Invalid or corrupted PDF file")
+        
+        # Process with PyMuPDF
+        loader = PyMuPDFLoader(temp_path)
         documents = loader.load()
-    text_splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
-    docs = text_splitter.split_documents(documents)
-    return FAISS.from_documents(docs, OpenAIEmbeddings(openai_api_key=openai_api_key))
-
-def ai_query(question, context, history_key):
-    """Handle AI queries with history"""
-    chat = ChatOpenAI(temperature=0, openai_api_key=openai_api_key)
-    response = chat([
-        SystemMessage(content=f"Context: {context}"),
-        HumanMessage(content=question)
-    ])
-    st.session_state[history_key].append((question, response.content))
-    return response.content
-
-# Main App
-st.title("AI Clinical Trial Management System")
-tech_tab, medical_tab = st.tabs(["TechVitals Admin", "Medical Company"])
-
-with tech_tab:
-    st.header("TechVitals Admin Portal")
+        
+        # Cleanup
+        shutil.rmtree(temp_dir)
+        
+        return FAISS.from_documents(
+            RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100).split_documents(documents),
+            OpenAIEmbeddings(openai_api_key=openai_api_key)
+        )
     
-    # CSV Upload and Filters
-    csv_file = st.file_uploader("Upload Volunteer CSV", type=["csv"])
-    if csv_file:
-        df = pd.read_csv(csv_file)
-        required_cols = {"VolunteerID", "Age", "Gender", "Region", "Condition", "Email"}
-        
-        if required_cols.issubset(df.columns):
-            # Filters
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                age_range = st.slider("Age Range", 
-                                    int(df.Age.min()), 
-                                    int(df.Age.max()), 
-                                    (25, 60))
-            with col2:
-                gender = st.selectbox("Gender", ["All"] + list(df.Gender.unique()))
-            with col3:
-                region = st.selectbox("Region", ["All"] + list(df.Region.unique()))
-            
-            # Apply filters
-            filtered_df = df[
-                (df.Age >= age_range[0]) & 
-                (df.Age <= age_range[1])
-            ]
-            if gender != "All":
-                filtered_df = filtered_df[filtered_df.Gender == gender]
-            if region != "All":
-                filtered_df = filtered_df[filtered_df.Region == region]
-            
-            # Display filtered data
-            st.dataframe(filtered_df[['VolunteerID', 'Age', 'Gender', 'Region', 'Condition']])
-            
-            # Q&A Section
-            st.subheader("Dataset Q&A")
-            question = st.text_input("Ask about volunteers:")
-            if st.button("Ask"):
-                context = filtered_df.to_csv()
-                answer = ai_query(question, context, 'tech_history')
-                st.write(answer)
-            
-            # Conversation History
-            with st.expander("Conversation History"):
-                for q, a in st.session_state.tech_history[-5:]:
-                    st.markdown(f"**Q:** {q}  \n**A:** {a}")
+    except Exception as e:
+        if 'temp_dir' in locals():
+            shutil.rmtree(temp_dir, ignore_errors=True)
+        st.error(f"PDF Processing Failed: {str(e)}")
+        return None
 
-with medical_tab:
-    st.header("Medical Company Portal")
+# Streamlit UI
+st.set_page_config(page_title="Secure Clinical Trial System", layout="wide")
+
+# TechVitals Admin Portal
+with st.expander("TechVitals Admin Portal", expanded=True):
+    uploaded_csv = st.file_uploader("Upload Volunteer CSV", type=["csv"])
+    if uploaded_csv:
+        try:
+            df = pd.read_csv(uploaded_csv)
+            required_cols = {'VolunteerID', 'Age', 'Gender', 'Condition', 'Email'}
+            
+            if required_cols.issubset(df.columns):
+                st.success("Dataset loaded successfully!")
+                st.dataframe(df.head())
+            else:
+                st.error(f"Missing columns: {required_cols - set(df.columns)}")
+        except Exception as e:
+            st.error(f"CSV Error: {str(e)}")
+
+# Medical Company Portal
+with st.expander("Medical Trial Portal", expanded=True):
+    uploaded_pdf = st.file_uploader("Upload Trial Criteria PDF", 
+                                  type=["pdf"],
+                                  help="Upload a valid, unencrypted PDF document")
     
-    # PDF Upload and Processing
-    pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"])
-    if pdf_file:
-        vectorstore = process_pdf(pdf_file)
+    if uploaded_pdf:
+        vector_store = process_pdf(uploaded_pdf)
         
-        # Eligibility Check
-        st.subheader("Find Eligible Volunteers")
-        query = st.text_input("Enter eligibility criteria:")
-        
-        if st.button("Check Eligibility"):
-            # AI Processing
-            docs = vectorstore.similarity_search(query, k=5)
-            context = "\n".join([d.page_content for d in docs])
+        if vector_store:
+            st.success("PDF Successfully Analyzed!")
             
-            # Get filtered volunteers
-            filtered = df.copy()  # Assuming df is loaded from TechVitals
-            
-            # AI-based filtering
-            prompt = f"""Analyze trial criteria and filter volunteers:
-            Criteria: {context}
-            Volunteers Metadata: {filtered[['Age', 'Gender', 'Condition']].to_csv()}
-            Return JSON with filters to apply"""
-            
-            response = ChatOpenAI().predict(prompt)
-            try:
-                filters = json.loads(response)
-                if 'min_age' in filters: filtered = filtered[filtered.Age >= filters['min_age']]
-                if 'max_age' in filters: filtered = filtered[filtered.Age <= filters['max_age']]
-                if 'gender' in filters: filtered = filtered[filtered.Gender == filters['gender']]
-                if 'conditions' in filters: 
-                    filtered = filtered[filtered.Condition.isin(filters['conditions'])]
-                
-                # Display confidential results
-                st.subheader("Eligible Volunteers")
-                st.dataframe(filtered[['VolunteerID', 'Age', 'Gender', 'Condition', 'Email']])
-            
-            except Exception as e:
-                st.error(f"Error applying filters: {e}")
-        
-        # Medical Q&A
-        st.subheader("Trial Criteria Q&A")
-        med_question = st.text_input("Ask about trial criteria:")
-        if st.button("Ask Expert"):
-            answer = ai_query(med_question, context, 'medical_history')
-            st.write(answer)
-        
-        # Medical History
-        with st.expander("Trial Conversation History"):
-            for q, a in st.session_state.medical_history[-5:]:
-                st.markdown(f"**Q:** {q}  \n**A:** {a}")
+            # Eligibility Search
+            query = st.text_input("Search for eligible volunteers:")
+            if query:
+                try:
+                    results = vector_store.similarity_search(query, k=5)
+                    st.subheader("Matching Criteria:")
+                    for doc in results:
+                        st.write(doc.page_content)
+                except Exception as e:
+                    st.error(f"Search Error: {str(e)}")
+
+# Common error prevention features
+st.markdown("""
+<style>
+    .stExpander {border: 1px solid #e0e0e0; border-radius: 8px; margin: 1rem 0;}
+    .stFileUploader {margin-bottom: 1rem;}
+</style>
+""", unsafe_allow_html=True)

@@ -22,9 +22,9 @@ st.set_page_config(page_title="AI Clinical Trial Management System", layout="wid
 st.title("AI Clinical Trial Management System")
 tab1, tab2 = st.tabs(["TechVitals Admin", "Medical Company"])
 
-############################
-##### Helper Functions #####
-############################
+#########################
+##### Helper Functions ##
+#########################
 
 def process_pdf(pdf_file):
     temp_path = "temp_trial.pdf"
@@ -36,7 +36,54 @@ def process_pdf(pdf_file):
     documents = loader.load_and_split(text_splitter=text_splitter)
     embeddings = OpenAIEmbeddings(openai_api_key=api_key)
     vectorstore = FAISS.from_documents(documents, embeddings)
-    return vectorstore
+    return vectorstore, documents
+
+def extract_criteria(documents):
+    llm = ChatOpenAI(temperature=0, openai_api_key=api_key)
+    content = " ".join([doc.page_content for doc in documents])
+    prompt = f"""
+    From the following clinical trial criteria text, extract:
+    - Minimum Age
+    - Maximum Age
+    - Required Condition
+    - Required Biomarker
+    - Allowed Stages
+    - Allowed Gender
+    - Exclude Diabetes (Yes/No)
+    - Exclude Pregnant (Yes/No)
+
+    Text:
+    {content}
+
+    Provide answer as JSON with keys:
+    min_age, max_age, condition, biomarker, stages, gender, exclude_diabetes, exclude_pregnant.
+    """
+    response = llm.predict(prompt)
+    try:
+        criteria = json.loads(response)
+    except:
+        criteria = {}
+    return criteria
+
+def filter_df(df, criteria):
+    filtered = df.copy()
+    if "min_age" in criteria and criteria["min_age"]:
+        filtered = filtered[filtered["Age"] >= int(criteria["min_age"])]
+    if "max_age" in criteria and criteria["max_age"]:
+        filtered = filtered[filtered["Age"] <= int(criteria["max_age"])]
+    if "condition" in criteria and criteria["condition"]:
+        filtered = filtered[filtered["Condition"].str.lower().str.contains(criteria["condition"].lower(), na=False)]
+    if "biomarker" in criteria and criteria["biomarker"]:
+        filtered = filtered[filtered["BiomarkerStatus"].str.contains(criteria["biomarker"], na=False)]
+    if "stages" in criteria and criteria["stages"]:
+        filtered = filtered[filtered["DiseaseStage"].isin(criteria["stages"] if isinstance(criteria["stages"], list) else [criteria["stages"]])]
+    if "gender" in criteria and criteria["gender"] and criteria["gender"].lower() != "any":
+        filtered = filtered[filtered["Gender"].str.lower() == criteria["gender"].lower()]
+    if "exclude_diabetes" in criteria and str(criteria["exclude_diabetes"]).lower() == "yes":
+        filtered = filtered[filtered["Diabetes"].str.lower() != "yes"]
+    if "exclude_pregnant" in criteria and str(criteria["exclude_pregnant"]).lower() == "yes":
+        filtered = filtered[filtered["Pregnant"].str.lower() != "yes"]
+    return filtered
 
 def ask_llm(context, question):
     llm = ChatOpenAI(temperature=0, openai_api_key=api_key)
@@ -62,13 +109,11 @@ with tab1:
     csv_file = st.file_uploader("Upload Volunteer CSV", type=["csv"], key="admin_csv")
     if csv_file:
         df = pd.read_csv(csv_file)
+        st.session_state["admin_df"] = df
+    elif "admin_df" in st.session_state:
+        df = st.session_state["admin_df"]
     else:
-        if os.path.exists("patient_data1.csv"):
-            df = pd.read_csv("patient_data1.csv")
-            st.info("Using default patient_data1.csv")
-        else:
-            st.warning("No CSV uploaded and no default CSV found.")
-            df = pd.DataFrame()
+        df = pd.DataFrame()
 
     if not df.empty:
         age_range = st.slider("Age Range", int(df["Age"].min()), int(df["Age"].max()), (int(df["Age"].min()), int(df["Age"].max())))
@@ -111,33 +156,43 @@ with tab2:
     st.subheader("Medical Company Portal")
 
     pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"], key="med_pdf")
+
     if pdf_file:
         try:
-            vectorstore = process_pdf(pdf_file)
-            st.success("PDF processed and indexed.")
-            st.session_state["vectorstore"] = vectorstore
+            vectorstore, documents = process_pdf(pdf_file)
+            st.success("PDF processed successfully.")
+            criteria = extract_criteria(documents)
+            st.session_state["criteria"] = criteria
+            st.write("**Extracted Criteria:**")
+            st.json(criteria)
         except Exception as e:
             st.error(f"Error processing PDF: {e}")
-            st.session_state["vectorstore"] = None
+            criteria = {}
+            st.session_state["criteria"] = {}
     else:
-        st.session_state["vectorstore"] = None
+        criteria = st.session_state.get("criteria", {})
 
-    if not df.empty:
-        age_range_m = st.slider("Age Range", int(df["Age"].min()), int(df["Age"].max()), (int(df["Age"].min()), int(df["Age"].max())), key="med_age")
+    if not df.empty and criteria:
+        filtered_m = filter_df(df, criteria)
+
+        age_range_m = st.slider("Age Range", int(filtered_m["Age"].min()) if not filtered_m.empty else 0,
+                                int(filtered_m["Age"].max()) if not filtered_m.empty else 100,
+                                (int(df["Age"].min()), int(df["Age"].max())),
+                                key="med_age")
         gender_m = st.selectbox("Gender", ["All"] + list(df["Gender"].dropna().unique()), key="med_gender")
         region_m = st.selectbox("Region", ["All"] + list(df["Region"].dropna().unique()), key="med_region")
 
-        filtered_m = df[(df["Age"] >= age_range_m[0]) & (df["Age"] <= age_range_m[1])]
+        # Further filters
+        final_filtered = filtered_m[(filtered_m["Age"] >= age_range_m[0]) & (filtered_m["Age"] <= age_range_m[1])]
         if gender_m != "All":
-            filtered_m = filtered_m[filtered_m["Gender"] == gender_m]
+            final_filtered = final_filtered[final_filtered["Gender"] == gender_m]
         if region_m != "All":
-            filtered_m = filtered_m[filtered_m["Region"] == region_m]
+            final_filtered = final_filtered[final_filtered["Region"] == region_m]
 
         st.markdown("### Eligible Volunteers (Privacy Protected)")
 
-        # Only show ID, Email, Stage, Biomarker, Gender
         display_cols = ["VolunteerID", "Email", "DiseaseStage", "BiomarkerStatus", "Gender"]
-        st.dataframe(filtered_m[display_cols])
+        st.dataframe(final_filtered[display_cols])
 
         st.markdown("### Ask a Question (AI Powered)")
         med_question = st.text_input("Ask about eligible volunteers:", key="med_q")
@@ -147,13 +202,8 @@ with tab2:
 
         if st.button("Ask", key="med_ask"):
             if med_question:
-                if st.session_state.get("vectorstore") is not None:
-                    docs = st.session_state["vectorstore"].similarity_search(med_question, k=3)
-                    context = " ".join([doc.page_content for doc in docs])
-                else:
-                    context = ""
-                data_context = filtered_m[display_cols].to_json(orient="records")
-                full_context = f"PDF context:\n{context}\n\nData:\n{data_context}"
+                data_context = final_filtered[display_cols].to_json(orient="records")
+                full_context = f"PDF criteria:\n{criteria}\n\nData:\n{data_context}"
                 answer = ask_llm(full_context, med_question)
                 st.session_state["med_history"].append((med_question, answer))
                 st.success(answer)
@@ -163,3 +213,6 @@ with tab2:
                 st.markdown(f"**Q:** {q}")
                 st.markdown(f"**A:** {a}")
                 st.markdown("---")
+    elif not criteria:
+        st.warning("Please upload a Trial Criteria PDF to extract and apply eligibility rules.")
+

@@ -7,3 +7,5 @@ langchain-community
 langchain-openai
 faiss-cpu
 PyMuPDF
+spacy
+openai

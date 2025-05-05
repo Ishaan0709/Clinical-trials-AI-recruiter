@@ -66,15 +66,9 @@ def filter_volunteers(df, criteria):
         result = result[result["Pregnant"].str.lower() != "yes"]
     return result
 
-# -------------------------- RULE-BASED QA FUNCTION --------------------------
+# -------------------------- RULE-BASED QA FUNCTION (polite + reason) --------------------------
 def answer_question(q, df, criteria=None):
     q_lower = q.lower()
-
-    # Irrelevant questions check
-    irrelevant_phrases = ["name", "who are you", "how are you", "what is your role"]
-    for phrase in irrelevant_phrases:
-        if phrase in q_lower:
-            return "I'm an AI assistant for clinical trial volunteer data. Please ask about volunteers or eligibility."
 
     if "how many" in q_lower:
         if "male" in q_lower:
@@ -98,13 +92,18 @@ def answer_question(q, df, criteria=None):
             vid = vid[0]
             full_df = st.session_state.volunteers_df
             row = full_df[full_df["VolunteerID"] == vid]
+
             if row.empty:
-                return f"Volunteer {vid} not found in the dataset."
+                return f"Volunteer ID {vid} not found in the dataset."
+
+            # Check if this volunteer is in the eligible list (df is already filtered)
+            if vid in df["VolunteerID"].values:
+                return f"Sir, the volunteer {vid} is fully eligible for the clinical trial."
+
             else:
                 reasons = []
                 r = row.iloc[0]
-                if vid in list(df["VolunteerID"]):
-                    return f"Volunteer {vid} meets all the eligibility criteria and is fully eligible."
+
                 if r["Age"] < criteria["min_age"] or r["Age"] > criteria["max_age"]:
                     reasons.append("Age not in eligible range.")
                 if criteria["condition"] and criteria["condition"].lower() not in str(r["Condition"]).lower():
@@ -119,17 +118,23 @@ def answer_question(q, df, criteria=None):
                     reasons.append("Has diabetes.")
                 if criteria["exclude_pregnant"] == "Yes" and str(r["Pregnant"]).lower() == "yes":
                     reasons.append("Is pregnant.")
-                return ", ".join(reasons) if reasons else "Volunteer does not meet one or more eligibility criteria."
+
+                if reasons:
+                    return f"Volunteer {vid} is not eligible because: " + ", ".join(reasons)
+                else:
+                    return f"Volunteer {vid} is not eligible but specific reasons could not be determined."
+
         else:
             return "Volunteer ID not recognized."
 
-    return None  # GPT fallback allowed
+    else:
+        return None  # So that GPT can answer if rule-based fails
 
 # -------------------------- GPT QA FUNCTION --------------------------
 def gpt_answer(q, df):
     llm = ChatOpenAI(temperature=0)
 
-    volunteer_data = df[["VolunteerID", "Age", "Gender", "DiseaseStage", "BiomarkerStatus", "Region", "Diabetes", "Pregnant"]].to_string(index=False)
+    volunteer_data = df[["VolunteerID", "Age", "Gender", "DiseaseStage", "BiomarkerStatus", "Region"]].to_string(index=False)
 
     prompt = PromptTemplate(
         template="""
@@ -141,14 +146,52 @@ def gpt_answer(q, df):
         Question:
         {question}
 
-        If the question is not related to volunteers or eligibility, reply: "I'm an AI assistant for volunteer eligibility. Please ask relevant questions."
-
         Answer:""",
         input_variables=["data", "question"]
     )
 
     final_prompt = prompt.format(data=volunteer_data, question=q)
     return llm.predict(final_prompt)
+
+# -------------------------- ENTITY EXTRACTION (No spaCy) --------------------------
+def extract_entities(q):
+    genders = []
+    stages = []
+    regions = []
+    biomarkers = []
+    ages = []
+
+    q_lower = q.lower()
+
+    if "male" in q_lower:
+        genders.append("Male")
+    if "female" in q_lower:
+        genders.append("Female")
+
+    for s in ["I", "II", "III", "IV"]:
+        if f"stage {s}".lower() in q_lower:
+            stages.append(s)
+
+    for b in ["EGFR+", "ALK+", "KRAS+", "ROS1+"]:
+        if b.lower() in q_lower:
+            biomarkers.append(b)
+
+    region_keywords = ["North", "South", "East", "West", "Delhi", "Mumbai", "Kolkata", "Chennai", "Hyderabad"]
+    for r in region_keywords:
+        if r.lower() in q_lower:
+            regions.append(r)
+
+    age_numbers = re.findall(r'(?:above|over|greater than|older than|age)\s*(\d+)', q_lower)
+    if age_numbers:
+        ages.append(int(age_numbers[0]))
+
+    return {
+        "gender": genders,
+        "stage": stages,
+        "region": regions,
+        "biomarker": biomarkers,
+        "age": ages
+    }
 
 # -------------------------- UI --------------------------
 
@@ -199,10 +242,6 @@ with tab1:
 with tab2:
     st.header("Medical Company Portal")
 
-    if st.session_state.volunteers_df.empty:
-        st.warning("Please upload the Volunteers CSV in the TechVitals Admin tab before proceeding.")
-        st.stop()
-
     pdf_file = st.file_uploader("Upload Trial Criteria PDF", type=["pdf"])
     if pdf_file:
         with st.spinner("Processing PDF..."):
@@ -216,6 +255,7 @@ with tab2:
 
         eligible = filter_volunteers(st.session_state.volunteers_df, st.session_state.criteria)
 
+        # Medical panel filters
         st.subheader("Filter Eligible Volunteers")
         min_age_m, max_age_m = st.slider(
             "Age Range", 0, 100,
@@ -246,9 +286,29 @@ with tab2:
         st.subheader("Ask a Question (AI Powered)")
         q2 = st.text_input("Ask about eligible volunteers:", key="medical_q")
         if st.button("Ask", key="medical_ask"):
+
             ans2 = answer_question(q2, filtered_med, st.session_state.criteria)
+
             if ans2 is None:
-                ans2 = gpt_answer(q2, filtered_med)
+                entities = extract_entities(q2)
+                filtered = filtered_med.copy()
+
+                if entities["gender"]:
+                    filtered = filtered[filtered["Gender"].isin(entities["gender"])]
+                if entities["stage"]:
+                    filtered = filtered[filtered["DiseaseStage"].isin(entities["stage"])]
+                if entities["region"]:
+                    filtered = filtered[filtered["Region"].isin(entities["region"])]
+                if entities["biomarker"]:
+                    filtered = filtered[filtered["BiomarkerStatus"].isin(entities["biomarker"])]
+                if entities["age"]:
+                    filtered = filtered[filtered["Age"] >= max(entities["age"])]
+
+                if not filtered.empty:
+                    ans2 = f"Found {len(filtered)} matching volunteers: " + ", ".join(filtered["VolunteerID"])
+                else:
+                    ans2 = gpt_answer(q2, filtered_med)
+
             st.session_state.history_medical.append((q2, ans2))
             st.success(ans2)
 
@@ -256,4 +316,3 @@ with tab2:
             with st.expander("Conversation History"):
                 for ques2, ans2 in st.session_state.history_medical:
                     st.markdown(f"**Q:** {ques2}\n\n**A:** {ans2}")
-

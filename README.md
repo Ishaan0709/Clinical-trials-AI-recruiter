@@ -4,7 +4,7 @@
 
 ## 🔗 Live
 - Website (Landing): https://ishaan0709.github.io/Techvital_clinical_trials/
-- AI App (Streamlit): http://localhost:8501
+- AI App (Streamlit): https://ishaan000999-pb9qvwjtdda7wdeqctz4fd.streamlit.app/
 -  _Dev locally:_ http://localhost:8501
 
 ## ⚙️ Stack

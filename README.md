@@ -5,7 +5,7 @@
 ## 🔗 Live
 - Website (Landing): https://ishaan0709.github.io/Techvital_clinical_trials/
 - AI App (Streamlit): http://localhost:8501
-  _Dev locally:_ http://localhost:8501
+-  _Dev locally:_ http://localhost:8501
 
 ## ⚙️ Stack
 Streamlit • Python • LangChain • **RAG** • FAISS • OpenAI • PyMuPDF (fitz) • pandas

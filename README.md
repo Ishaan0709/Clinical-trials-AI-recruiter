@@ -1,23 +1,22 @@
-# 🧪 Clinical Trials AI Recruiter (MedMatch AI)
+# Clinical Trials AI Recruiter (MedMatch AI)
 
-LLM-powered app to match **clinical trial criteria** (PDF) with **volunteer data** (CSV), filter results, and answer short questions.
+**Volunteer recruitment AI** for clinical trials. Uses **RAG (Retrieval-Augmented Generation)** on trial-criteria **PDFs** + volunteer **CSV** to return fast eligibility counts, shortlists, and 2–3 sentence answers.
 
 ## 🔗 Live
-- Website (Main Webpage): https://ishaan0709.github.io/Techvital_clinical_trials/
-- AI Chatbot (Streamlit): http://localhost:8501/  
-  _Dev locally: http://localhost:8501
+- Website (Landing): https://ishaan0709.github.io/Techvital_clinical_trials/
+- AI App (Streamlit): http://localhost:8501
+  _Dev locally:_ http://localhost:8501
 
-## ✨ What it does
-- Upload Volunteers CSV → filter by age, gender, region
-- Upload Trial Criteria PDF → parser extracts required fields
-- Get eligible counts / shortlists and 2–3 sentence AI answers
+## ⚙️ Stack
+Streamlit • Python • LangChain • **RAG** • FAISS • OpenAI • PyMuPDF (fitz) • pandas
 
-## 🧰 Tech
-Python, Streamlit, LangChain, langchain-openai, FAISS, pandas, PyMuPDF (fitz)
+## 🧠 How it works
+1. Parse criteria **PDF** → extract: `Age between 30 and 75 years`, `Non-Small Cell Lung Cancer (NSCLC)`, `EGFR-positive (EGFR+)`, `Stage III or IV`.  
+2. Chunk text → **FAISS** embeddings; query with **LangChain + OpenAI**.  
+3. Filter CSV by age/gender/region/stage/biomarker; answer with concise summaries.
 
-## 🚀 Run locally
-```bash
-python -m venv .venv
-# Win: .venv\Scripts\activate   |   Mac/Linux: source .venv/bin/activate
-pip install -r requirements.txt
-streamlit run ishaan_python.py
+## 💬 Try in the Medical tab
+- “How many eligible volunteers?”  
+- “Eligible **EGFR+ Stage IV** volunteers?”  
+- “Eligible females from **Mumbai** (show up to 5 IDs).”
+
